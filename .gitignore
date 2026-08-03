@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+
+# NAPS2 portable (a telecharger separement, voir README)
+NAPS2/
+naps2*.zip
+
+# Sorties et logs generes localement
+*.log
+.autoscan_tmp/
