@@ -4,13 +4,14 @@ Scan automatique multi-pages pour Brother DS-640, via NAPS2 (moteur WIA natif).
 Tourne en continu et totalement invisible (icone dans la barre des taches
 seulement -- lance-le avec pythonw.exe, pas python.exe). Boucle sur des
 tentatives de scan :
-  - Des qu'une feuille est presente dans le bac, elle est scannee et
-    ajoutee au document en cours.
+  - Des qu'une feuille est presente dans le bac, elle est scannee (en image
+    brute) et ajoutee au document en cours.
   - S'il n'y a pas de feuille, l'appel echoue rapidement (~2s) et on
     reessaie.
   - Si aucune nouvelle page n'arrive pendant WAIT_SECONDS apres la
-    derniere page scannee, le document en cours est fusionne en un PDF
-    final dans OUTPUT_FOLDER.
+    derniere page scannee, chaque page est ré-orientee automatiquement si
+    besoin (detection via Tesseract OSD), puis toutes les pages sont
+    fusionnees et passees a l'OCR en un seul PDF final dans OUTPUT_FOLDER.
 
 Couleurs de l'icone :
   bleu = en attente d'un document
@@ -33,6 +34,8 @@ import uuid
 from datetime import datetime
 
 import pystray
+import pytesseract
+import win32job
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw
 from pypdf import PdfWriter
@@ -45,7 +48,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(SCRIPT_DIR, ".env"))
 
 OUTPUT_FOLDER = os.environ["OUTPUT_FOLDER"]
-WAIT_SECONDS = int(os.environ.get("WAIT_SECONDS", "30"))
+WAIT_SECONDS = int(os.environ.get("WAIT_SECONDS", "15"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "2"))
 
 NAPS2_CONSOLE = os.environ.get(
@@ -54,6 +57,11 @@ NAPS2_CONSOLE = os.environ.get(
 DEVICE_NAME = os.environ["DEVICE_NAME"]
 DPI = int(os.environ.get("DPI", "200"))
 COLOR_MODE = os.environ.get("COLOR_MODE", "color")  # "color", "gray" ou "bw"
+PAGE_SIZE = os.environ.get("PAGE_SIZE", "a4")
+DESKEW = os.environ.get("DESKEW", "true").lower() != "false"
+AUTO_ROTATE = os.environ.get("AUTO_ROTATE", "true").lower() != "false"
+OCR_LANG = os.environ.get("OCR_LANG", "fra+eng")
+TESSERACT_CMD = os.environ.get("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
 
 SESSION_DIR = os.path.join(OUTPUT_FOLDER, ".autoscan_tmp")
 LOG_FILE = os.path.join(OUTPUT_FOLDER, "autoscan.log")
@@ -61,8 +69,9 @@ LOG_FILE = os.path.join(OUTPUT_FOLDER, "autoscan.log")
 EMPTY_FEEDER_MARKERS = (
     "aucune page dans le dispositif",  # FR
     "no pages were found in the document feeder",  # EN
-    "no scanned pages",
 )
+
+pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 
 logging.basicConfig(
     filename=LOG_FILE,
@@ -74,6 +83,41 @@ log = logging.getLogger("autoscan")
 
 class ScanFailed(Exception):
     pass
+
+
+# ---------------------------------------------------------------------------
+# Job Object Windows : garantit que NAPS2.Console.exe est tue automatiquement
+# si ce script est arrete brutalement (fermeture de fenetre, Ctrl+C, kill),
+# pour eviter un sous-processus orphelin qui garde le scanner "occupe".
+# ---------------------------------------------------------------------------
+
+_job_handle = win32job.CreateJobObject(None, "")
+_job_info = win32job.QueryInformationJobObject(_job_handle, win32job.JobObjectExtendedLimitInformation)
+_job_info["BasicLimitInformation"]["LimitFlags"] |= win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+win32job.SetInformationJobObject(_job_handle, win32job.JobObjectExtendedLimitInformation, _job_info)
+
+
+def _run_naps2(args, timeout=60):
+    proc = subprocess.Popen(
+        [NAPS2_CONSOLE] + args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    try:
+        win32job.AssignProcessToJobObject(_job_handle, proc._handle)
+    except Exception:
+        log.warning("Impossible de rattacher NAPS2.Console.exe au job object")
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise ScanFailed(f"NAPS2 n'a pas repondu dans les {timeout}s, processus tue")
+
+    return proc.returncode, stdout, stderr
 
 
 # ---------------------------------------------------------------------------
@@ -103,57 +147,98 @@ def set_status(state, tooltip):
 
 
 # ---------------------------------------------------------------------------
-# Scan via NAPS2
+# Scan via NAPS2 (image brute, pas encore d'OCR ni de rotation)
 # ---------------------------------------------------------------------------
 
-def scan_page_to_pdf(output_path):
+def scan_page_to_image(output_path):
     """Retourne True si une page a ete scannee, False si le bac est vide."""
     args = [
-        NAPS2_CONSOLE,
         "--driver", "wia",
         "--device", DEVICE_NAME,
         "--source", "feeder",
         "--dpi", str(DPI),
         "--bitdepth", COLOR_MODE,
+        "--pagesize", PAGE_SIZE,
         "-o", output_path,
         "--force",
     ]
-    result = subprocess.run(
-        args,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    )
+    if DESKEW:
+        args.append("--deskew")
 
-    if result.returncode == 0 and os.path.exists(output_path):
+    returncode, stdout, stderr = _run_naps2(args, timeout=60)
+
+    if returncode == 0 and os.path.exists(output_path):
         return True
 
-    combined_output = f"{result.stdout} {result.stderr}".lower()
+    combined_output = f"{stdout} {stderr}".lower()
     if any(marker in combined_output for marker in EMPTY_FEEDER_MARKERS):
         return False
 
     raise ScanFailed(
-        f"NAPS2 a echoue (code {result.returncode}) : "
-        f"{result.stdout.strip()} {result.stderr.strip()}"
+        f"NAPS2 a echoue (code {returncode}) : {stdout.strip()} {stderr.strip()}"
     )
 
 
 # ---------------------------------------------------------------------------
-# Finalisation PDF
+# Correction d'orientation (page inseree a l'envers ou de travers a 90/180/270)
+# ---------------------------------------------------------------------------
+
+def correct_orientation(image_path):
+    try:
+        with Image.open(image_path) as img:
+            osd = pytesseract.image_to_osd(img, output_type=pytesseract.Output.DICT)
+            rotate = int(osd.get("rotate", 0))
+            if rotate:
+                corrected = img.rotate(-rotate, expand=True)
+                corrected.save(image_path)
+                log.info(
+                    "Page %s : rotation corrigee de %d degres (confiance %.1f)",
+                    os.path.basename(image_path), rotate, osd.get("orientation_conf", 0),
+                )
+    except pytesseract.TesseractError as e:
+        log.warning(
+            "Detection d'orientation impossible pour %s (page probablement peu de texte) : %s",
+            os.path.basename(image_path), e,
+        )
+    except Exception:
+        log.exception("Erreur inattendue lors de la correction d'orientation de %s", image_path)
+
+
+# ---------------------------------------------------------------------------
+# Finalisation : rotation + fusion + OCR en un seul PDF, via NAPS2
 # ---------------------------------------------------------------------------
 
 def finalize_pdf(page_paths, created_at):
+    if AUTO_ROTATE:
+        for p in page_paths:
+            correct_orientation(p)
+
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
     date_string = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d_%H-%M-%S")
     output_path = os.path.join(OUTPUT_FOLDER, f"scan_{date_string}.pdf")
 
-    writer = PdfWriter()
-    for p in page_paths:
-        writer.append(p)
-    with open(output_path, "wb") as f:
-        writer.write(f)
-    writer.close()
+    import_arg = ";".join(page_paths)
+    args = [
+        "-i", import_arg,
+        "-n", "0",
+        "--ocrlang", OCR_LANG,
+        "--enableocr",
+        "-o", output_path,
+        "--force",
+    ]
+    returncode, stdout, stderr = _run_naps2(args, timeout=60 + 20 * len(page_paths))
+
+    if returncode != 0 or not os.path.exists(output_path):
+        log.error(
+            "Echec de la fusion/OCR (code %s) : %s %s -- fallback sans OCR",
+            returncode, stdout.strip(), stderr.strip(),
+        )
+        writer = PdfWriter()
+        for p in page_paths:
+            writer.append(p)
+        with open(output_path, "wb") as f:
+            writer.write(f)
+        writer.close()
 
     for p in page_paths:
         os.remove(p)
@@ -175,10 +260,10 @@ def scan_loop(stop_event):
     last_activity = None
 
     while not stop_event.is_set():
-        tmp_path = os.path.join(SESSION_DIR, f"page_{uuid.uuid4().hex}.pdf")
+        tmp_path = os.path.join(SESSION_DIR, f"page_{uuid.uuid4().hex}.png")
 
         try:
-            scanned = scan_page_to_pdf(tmp_path)
+            scanned = scan_page_to_image(tmp_path)
         except ScanFailed as e:
             log.error("Echec du scan : %s", e)
             set_status("error", str(e)[:120])

@@ -6,6 +6,11 @@ scannee automatiquement ; si une nouvelle feuille arrive dans le delai
 imparti, elle est ajoutee au meme PDF ; sinon le PDF est finalise et
 enregistre.
 
+Chaque PDF final est recadre sur la taille de page reelle, redresse
+(deskew), reoriente automatiquement si une page a ete inseree a l'envers
+ou de cote, et passe a l'OCR pour produire un PDF dont le texte est
+cherchable/copiable.
+
 Tourne en tache de fond, sans fenetre, avec une icone dans la barre des
 taches (bleu = en attente, vert = document en cours de constitution, rouge
 = erreur).
@@ -34,6 +39,12 @@ quand le bac est vide -- ce qui permet un vrai polling reactif.
   Windows (`naps2-x.y.z-win-x64.zip`) -- **non fourni dans ce depot**,
   a extraire dans le dossier `NAPS2/` a la racine du projet (ou ailleurs,
   en renseignant `NAPS2_CONSOLE` dans `.env`)
+- [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) (utilise
+  uniquement pour la detection d'orientation des pages, distinct du moteur
+  OCR interne de NAPS2) :
+  ```bash
+  winget install -e --id UB-Mannheim.TesseractOCR
+  ```
 
 ## Installation
 
@@ -60,6 +71,14 @@ NAPS2\App\NAPS2.Console.exe --driver wia --listdevices
 
 Renseigner ce nom dans `DEVICE_NAME` (une correspondance partielle
 suffit).
+
+Installer les packs de langue OCR de NAPS2 (independants du Tesseract
+systeme) pour les langues souhaitees, ex. francais et anglais :
+
+```bash
+NAPS2\App\NAPS2.Console.exe --install ocr-fra
+NAPS2\App\NAPS2.Console.exe --install ocr-eng
+```
 
 ## Utilisation
 
@@ -96,15 +115,24 @@ Placer un raccourci vers `run_autoscan.bat` dans :
 | `DEVICE_NAME`   | Nom (ou partie du nom) du scanner                                   | *(obligatoire)*                          |
 | `DPI`           | Resolution de scan                                                  | `200`                                     |
 | `COLOR_MODE`    | `color`, `gray` ou `bw`                                             | `color`                                   |
+| `PAGE_SIZE`     | Format de page pour cadrer le scan (`a4`, `letter`, `8.5x11in`, ...) | `a4`                                      |
+| `DESKEW`        | Redresser automatiquement les pages legerement de travers            | `true`                                    |
+| `AUTO_ROTATE`   | Corriger l'orientation d'une page inseree a l'envers/de cote          | `true`                                    |
+| `OCR_LANG`      | Langue(s) OCR (codes 3 lettres, combinables avec `+`)                | `fra+eng`                                 |
+| `TESSERACT_CMD` | Chemin vers `tesseract.exe` (pour `AUTO_ROTATE` uniquement)          | `C:\Program Files\Tesseract-OCR\tesseract.exe` |
 
 ## Fonctionnement
 
-1. Boucle en continu : tente un scan depuis le bac (`--source feeder`).
+1. Boucle en continu : tente un scan depuis le bac (`--source feeder`),
+   cadre sur `PAGE_SIZE` et redresse (`--deskew`).
 2. Bac vide -> echec rapide (~2s), on reessaie apres `POLL_INTERVAL`.
-3. Feuille scannee -> ajoutee au document en cours.
-4. Si plus aucune feuille pendant `WAIT_SECONDS` -> le document est
-   fusionne en un seul PDF (`scan_AAAA-MM-JJ_HH-MM-SS.pdf`) dans
-   `OUTPUT_FOLDER`, et l'attente reprend pour un nouveau document.
+3. Feuille scannee -> image ajoutee au document en cours.
+4. Si plus aucune feuille pendant `WAIT_SECONDS` :
+   - chaque page est reorientee automatiquement si necessaire (detection
+     Tesseract OSD) ;
+   - toutes les pages sont fusionnees et passees a l'OCR en un seul PDF
+     (`scan_AAAA-MM-JJ_HH-MM-SS.pdf`) dans `OUTPUT_FOLDER` ;
+   - l'attente reprend pour un nouveau document.
 
 ## Limitations connues
 
