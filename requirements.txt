@@ -4,3 +4,4 @@ pypdf
 python-dotenv
 pywin32
 pytesseract
+numpy

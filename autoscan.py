@@ -33,11 +33,12 @@ import time
 import uuid
 from datetime import datetime
 
+import numpy as np
 import pystray
 import pytesseract
 import win32job
 from dotenv import load_dotenv
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 from pypdf import PdfWriter
 
 # ---------------------------------------------------------------------------
@@ -63,7 +64,14 @@ COLOR_MODE = os.environ.get("COLOR_MODE", "color")  # "color", "gray" ou "bw"
 PAGE_SIZE = os.environ.get("PAGE_SIZE", "8.5x14in")
 DESKEW = os.environ.get("DESKEW", "true").lower() != "false"
 AUTO_CROP = os.environ.get("AUTO_CROP", "true").lower() != "false"
-AUTO_CROP_THRESHOLD = int(os.environ.get("AUTO_CROP_THRESHOLD", "25"))
+# Seuil d'intensite de contour (0-255) : au-dela, un pixel compte comme
+# "contenu" plutot que fond. Le fond hors-page du DS-640 n'est pas toujours
+# uniforme (degrade de luminosite possible) d'ou une detection basee sur la
+# densite de contours par ligne/colonne plutot que sur la luminosite brute.
+AUTO_CROP_EDGE_THRESHOLD = int(os.environ.get("AUTO_CROP_EDGE_THRESHOLD", "60"))
+# Marge (pixels) ajoutee autour de la zone de contenu detectee, pour ne pas
+# couper un logo ou un gros aplat peu texture juste a cote du texte dense.
+AUTO_CROP_MARGIN = int(os.environ.get("AUTO_CROP_MARGIN", "60"))
 AUTO_ROTATE = os.environ.get("AUTO_ROTATE", "true").lower() != "false"
 OCR_LANG = os.environ.get("OCR_LANG", "fra+eng")
 TESSERACT_CMD = os.environ.get("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
@@ -185,23 +193,88 @@ def scan_page_to_image(output_path):
 
 
 # ---------------------------------------------------------------------------
-# Recadrage automatique sur le papier reel (la zone hors-page scannee par
-# le DS-640 apparait sombre/noire ; le papier, lui, est clair)
+# Recadrage automatique sur le papier reel. La zone hors-page scannee par
+# le DS-640 n'a pas une luminosite fixe (elle peut degrader progressivement
+# du blanc au gris selon la position), donc un simple seuil de luminosite
+# n'est pas fiable. On detecte a la place les zones a forte densite de
+# contours (texte, logos, codes-barres) par ligne et par colonne : le fond,
+# meme variable en luminosite, reste localement lisse et a une densite de
+# contours bien plus faible que le contenu imprime.
 # ---------------------------------------------------------------------------
 
-def auto_crop_to_content(image_path, margin_px=8):
+def _smooth(a, window):
+    kernel = np.ones(window) / window
+    return np.convolve(a, kernel, mode="same")
+
+
+def _find_runs(bool_array):
+    """Retourne la liste des (start, end) inclusifs de toutes les series
+    continues de True."""
+    runs = []
+    run_start = None
+    for i, v in enumerate(bool_array):
+        if v and run_start is None:
+            run_start = i
+        elif not v and run_start is not None:
+            runs.append((run_start, i - 1))
+            run_start = None
+    if run_start is not None:
+        runs.append((run_start, len(bool_array) - 1))
+    return runs
+
+
+def _content_extent(density, cutoff, min_width):
+    """Union des bornes de tous les blocs de densite au-dessus du seuil et
+    assez larges pour etre du contenu (logo, paragraphe, code-barres...)
+    plutot qu'un artefact ponctuel (bruit capteur, bande parasite)."""
+    runs = [r for r in _find_runs(density > cutoff) if r[1] - r[0] + 1 >= min_width]
+    if not runs:
+        return None
+    return min(r[0] for r in runs), max(r[1] for r in runs)
+
+
+def auto_crop_to_content(image_path, margin_px=AUTO_CROP_MARGIN, border_px=8, density_cutoff=0.006):
     try:
         with Image.open(image_path) as img:
             gray = img.convert("L")
-            mask = gray.point(lambda p: 255 if p > AUTO_CROP_THRESHOLD else 0)
-            bbox = mask.getbbox()
-            if not bbox or bbox == (0, 0, img.width, img.height):
+            edges = gray.filter(ImageFilter.FIND_EDGES)
+            # border_px exclut les artefacts de bord (filtre de contours et
+            # bord physique de la zone de numerisation), qui peuvent sinon
+            # se propager sur ~15px apres lissage et fausser le recadrage.
+            arr = np.asarray(edges)[border_px:-border_px, border_px:-border_px]
+            mask = arr > AUTO_CROP_EDGE_THRESHOLD
+
+            # Fenetre de lissage proportionnelle a la resolution : comble les
+            # petits espaces entre lignes de texte sans fusionner le fond
+            # avec le contenu.
+            window = max(8, DPI // 13)
+            row_density = _smooth(mask.mean(axis=1), window)
+            col_density = _smooth(mask.mean(axis=0), window)
+
+            # Un document a souvent plusieurs blocs de contenu separes par
+            # des espaces (logo, texte, code-barres...) : on prend l'union
+            # de tous les blocs assez larges, en ignorant les artefacts
+            # ponctuels (bruit capteur, bandes parasites) qui varient d'un
+            # scan a l'autre et peuvent depasser le seuil sur une largeur
+            # trop faible pour etre du vrai contenu.
+            min_width = window * 3
+            row_extent = _content_extent(row_density, density_cutoff, min_width)
+            col_extent = _content_extent(col_density, density_cutoff, min_width)
+            if row_extent is None or col_extent is None:
                 return
-            left, top, right, bottom = bbox
-            left = max(0, left - margin_px)
-            top = max(0, top - margin_px)
-            right = min(img.width, right + margin_px)
-            bottom = min(img.height, bottom + margin_px)
+            top, bottom = row_extent
+            left, right = col_extent
+
+            top = max(0, top + border_px - margin_px)
+            bottom = min(img.height, bottom + border_px + margin_px)
+            left = max(0, left + border_px - margin_px)
+            right = min(img.width, right + border_px + margin_px)
+
+            if (right - left) < 20 or (bottom - top) < 20:
+                return  # garde-fou contre une detection aberrante
+            if (left, top, right, bottom) == (0, 0, img.width, img.height):
+                return
+
             cropped = img.crop((left, top, right, bottom))
             cropped.save(image_path)
             log.info(
