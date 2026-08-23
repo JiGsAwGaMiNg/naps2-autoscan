@@ -115,24 +115,41 @@ Placer un raccourci vers `run_autoscan.bat` dans :
 | `DEVICE_NAME`   | Nom (ou partie du nom) du scanner                                   | *(obligatoire)*                          |
 | `DPI`           | Resolution de scan                                                  | `200`                                     |
 | `COLOR_MODE`    | `color`, `gray` ou `bw`                                             | `color`                                   |
-| `PAGE_SIZE`     | Format de page pour cadrer le scan (`a4`, `letter`, `8.5x11in`, ...) | `a4`                                      |
+| `PAGE_SIZE`     | Zone de capture maximale (pas la taille du papier, voir `AUTO_CROP`)  | `8.5x14in`                                |
 | `DESKEW`        | Redresser automatiquement les pages legerement de travers            | `true`                                    |
+| `AUTO_CROP`     | Recadrer automatiquement chaque page sur son contenu reel, quel que soit son format | `true`                   |
+| `AUTO_CROP_THRESHOLD` | Seuil (0-255) distinguant papier et fond hors-page              | `25`                                      |
 | `AUTO_ROTATE`   | Corriger l'orientation d'une page inseree a l'envers/de cote          | `true`                                    |
 | `OCR_LANG`      | Langue(s) OCR (codes 3 lettres, combinables avec `+`)                | `fra+eng`                                 |
 | `TESSERACT_CMD` | Chemin vers `tesseract.exe` (pour `AUTO_ROTATE` uniquement)          | `C:\Program Files\Tesseract-OCR\tesseract.exe` |
 
 ## Fonctionnement
 
-1. Boucle en continu : tente un scan depuis le bac (`--source feeder`),
-   cadre sur `PAGE_SIZE` et redresse (`--deskew`).
+1. Boucle en continu : tente un scan depuis le bac (`--source feeder`) sur
+   la zone maximale `PAGE_SIZE`, redresse (`--deskew`).
 2. Bac vide -> echec rapide (~2s), on reessaie apres `POLL_INTERVAL`.
 3. Feuille scannee -> image ajoutee au document en cours.
 4. Si plus aucune feuille pendant `WAIT_SECONDS` :
+   - chaque page est recadree automatiquement sur son contenu reel
+     (`AUTO_CROP`), quel que soit son format d'origine ;
    - chaque page est reorientee automatiquement si necessaire (detection
-     Tesseract OSD) ;
+     Tesseract OSD, `AUTO_ROTATE`) ;
    - toutes les pages sont fusionnees et passees a l'OCR en un seul PDF
      (`scan_AAAA-MM-JJ_HH-MM-SS.pdf`) dans `OUTPUT_FOLDER` ;
    - l'attente reprend pour un nouveau document.
+
+## Tickets de caisse et documents longs
+
+Le DS-640 limite les scans a 14 pouces (35,6 cm) par defaut via l'API WIA
+standard. Le mode "Long Receipts" du driver Brother necessite l'API WIA
+bas niveau (pas la couche simplifiee utilisable facilement depuis Python,
+qui est aussi celle dont le transfert d'image est casse sur ce modele --
+voir plus haut). Tenter de forcer une taille superieure a 14 pouces
+provoque un **bourrage papier confirme** (pas juste une troncature).
+
+Pour un document/ticket plus long que 14 pouces : scanne-le en plusieurs
+passages de 14 pouces maximum, en reinserant la suite avant l'expiration
+de `WAIT_SECONDS`. Chaque passage devient une page du meme PDF final.
 
 ## Limitations connues
 

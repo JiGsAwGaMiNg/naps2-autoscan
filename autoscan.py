@@ -57,8 +57,13 @@ NAPS2_CONSOLE = os.environ.get(
 DEVICE_NAME = os.environ["DEVICE_NAME"]
 DPI = int(os.environ.get("DPI", "200"))
 COLOR_MODE = os.environ.get("COLOR_MODE", "color")  # "color", "gray" ou "bw"
-PAGE_SIZE = os.environ.get("PAGE_SIZE", "a4")
+# Zone de capture maximale (le DS-640 supporte jusqu'a 8.5x14in) -- le
+# cadrage sur la taille reelle du papier se fait ensuite via AUTO_CROP,
+# ce qui evite de forcer un format fixe (a4/letter/...) pour tous les scans.
+PAGE_SIZE = os.environ.get("PAGE_SIZE", "8.5x14in")
 DESKEW = os.environ.get("DESKEW", "true").lower() != "false"
+AUTO_CROP = os.environ.get("AUTO_CROP", "true").lower() != "false"
+AUTO_CROP_THRESHOLD = int(os.environ.get("AUTO_CROP_THRESHOLD", "25"))
 AUTO_ROTATE = os.environ.get("AUTO_ROTATE", "true").lower() != "false"
 OCR_LANG = os.environ.get("OCR_LANG", "fra+eng")
 TESSERACT_CMD = os.environ.get("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
@@ -180,6 +185,35 @@ def scan_page_to_image(output_path):
 
 
 # ---------------------------------------------------------------------------
+# Recadrage automatique sur le papier reel (la zone hors-page scannee par
+# le DS-640 apparait sombre/noire ; le papier, lui, est clair)
+# ---------------------------------------------------------------------------
+
+def auto_crop_to_content(image_path, margin_px=8):
+    try:
+        with Image.open(image_path) as img:
+            gray = img.convert("L")
+            mask = gray.point(lambda p: 255 if p > AUTO_CROP_THRESHOLD else 0)
+            bbox = mask.getbbox()
+            if not bbox or bbox == (0, 0, img.width, img.height):
+                return
+            left, top, right, bottom = bbox
+            left = max(0, left - margin_px)
+            top = max(0, top - margin_px)
+            right = min(img.width, right + margin_px)
+            bottom = min(img.height, bottom + margin_px)
+            cropped = img.crop((left, top, right, bottom))
+            cropped.save(image_path)
+            log.info(
+                "Page %s : recadree de %dx%d a %dx%d",
+                os.path.basename(image_path), img.width, img.height,
+                cropped.width, cropped.height,
+            )
+    except Exception:
+        log.exception("Erreur inattendue lors du recadrage de %s", image_path)
+
+
+# ---------------------------------------------------------------------------
 # Correction d'orientation (page inseree a l'envers ou de travers a 90/180/270)
 # ---------------------------------------------------------------------------
 
@@ -209,6 +243,9 @@ def correct_orientation(image_path):
 # ---------------------------------------------------------------------------
 
 def finalize_pdf(page_paths, created_at):
+    if AUTO_CROP:
+        for p in page_paths:
+            auto_crop_to_content(p)
     if AUTO_ROTATE:
         for p in page_paths:
             correct_orientation(p)
