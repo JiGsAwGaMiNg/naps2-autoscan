@@ -113,8 +113,9 @@ Placer un raccourci vers `run_autoscan.bat` dans :
 | `POLL_INTERVAL` | Intervalle entre deux tentatives quand le bac est vide (secondes)  | `2`                                       |
 | `NAPS2_CONSOLE` | Chemin vers `NAPS2.Console.exe`                                     | `<dossier du script>/NAPS2/App/NAPS2.Console.exe` |
 | `DEVICE_NAME`   | Nom (ou partie du nom) du scanner                                   | *(obligatoire)*                          |
-| `DPI`           | Resolution de scan                                                  | `200`                                     |
+| `DPI`           | Resolution de scan (300 = bon compromis OCR, 600 = qualite max du DS-640) | `300`                               |
 | `COLOR_MODE`    | `color`, `gray` ou `bw`                                             | `color`                                   |
+| `JPEG_QUALITY`  | Qualite JPEG (0-100) des images dans le PDF final                   | `90`                                      |
 | `PAGE_SIZE`     | Zone de capture maximale (pas la taille du papier, voir `AUTO_CROP`)  | `8.5x14in`                                |
 | `DESKEW`        | Redresser automatiquement les pages legerement de travers            | `true`                                    |
 | `AUTO_CROP`     | Recadrer automatiquement chaque page sur son contenu reel, quel que soit son format | `true`                   |
@@ -131,7 +132,10 @@ Placer un raccourci vers `run_autoscan.bat` dans :
 3. Feuille scannee -> image ajoutee au document en cours.
 4. Si plus aucune feuille pendant `WAIT_SECONDS` :
    - chaque page est recadree automatiquement sur son contenu reel
-     (`AUTO_CROP`), quel que soit son format d'origine ;
+     (`AUTO_CROP`), quel que soit son format d'origine. Le cadre se cale
+     sur le texte dense, puis est repousse cote par cote si un element
+     epars (filet, bandeau, tampon...) le traverse, pour ne rien couper
+     (l'extension est notee dans `autoscan.log` : « cadre etendu ») ;
    - chaque page est reorientee automatiquement si necessaire (detection
      Tesseract OSD, `AUTO_ROTATE`) ;
    - toutes les pages sont fusionnees et passees a l'OCR en un seul PDF

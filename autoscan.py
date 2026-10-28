@@ -58,6 +58,7 @@ NAPS2_CONSOLE = os.environ.get(
 DEVICE_NAME = os.environ["DEVICE_NAME"]
 DPI = int(os.environ.get("DPI", "200"))
 COLOR_MODE = os.environ.get("COLOR_MODE", "color")  # "color", "gray" ou "bw"
+JPEG_QUALITY = int(os.environ.get("JPEG_QUALITY", "75"))
 # Zone de capture maximale (le DS-640 supporte jusqu'a 8.5x14in) -- le
 # cadrage sur la taille reelle du papier se fait ensuite via AUTO_CROP,
 # ce qui evite de forcer un format fixe (a4/letter/...) pour tous les scans.
@@ -71,7 +72,7 @@ AUTO_CROP = os.environ.get("AUTO_CROP", "true").lower() != "false"
 AUTO_CROP_EDGE_THRESHOLD = int(os.environ.get("AUTO_CROP_EDGE_THRESHOLD", "60"))
 # Marge (pixels) ajoutee autour de la zone de contenu detectee, pour ne pas
 # couper un logo ou un gros aplat peu texture juste a cote du texte dense.
-AUTO_CROP_MARGIN = int(os.environ.get("AUTO_CROP_MARGIN", "60"))
+AUTO_CROP_MARGIN = int(os.environ.get("AUTO_CROP_MARGIN", "20"))
 AUTO_ROTATE = os.environ.get("AUTO_ROTATE", "true").lower() != "false"
 OCR_LANG = os.environ.get("OCR_LANG", "fra+eng")
 TESSERACT_CMD = os.environ.get("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
@@ -233,7 +234,93 @@ def _content_extent(density, cutoff, min_width):
     return min(r[0] for r in runs), max(r[1] for r in runs)
 
 
-def auto_crop_to_content(image_path, margin_px=AUTO_CROP_MARGIN, border_px=8, density_cutoff=0.006):
+def _strip_is_clipped(region, ink_level=150, max_ink_fraction=0.6):
+    """Vrai si la bande contient de l'encre eparse, c'est-a-dire du contenu
+    (filet, bandeau, texte...) qui deborde, et non un aplat sombre qui serait
+    le fond hors-page du scanner."""
+    if region.size == 0:
+        return False
+    ink = region < ink_level
+    n = int(ink.sum())
+    return n >= 3 and n / ink.size < max_ink_fraction
+
+
+def _extend_over_clipped_content(g, box, border_px, max_extend, step, strip):
+    """Le cadre est cale sur le texte dense, mais des elements epars (filets,
+    bandeaux, tampons, signatures...) ont une densite de contours trop faible
+    pour compter et peuvent deborder du cadre. On repousse donc chaque bord,
+    cote par cote, tant que de l'encre le traverse, dans la limite de
+    max_extend pixels. Retourne (box, deplacements par cote)."""
+    h, w = g.shape
+    left, top, right, bottom = box
+    moved = {"gauche": 0, "haut": 0, "droite": 0, "bas": 0}
+
+    # Les bandes testees excluent les coins du cadre : apres une extension, le
+    # cadre peut mordre de quelques pixels sur le fond hors-page (surtout s'il
+    # est sombre), et ces pixels ne doivent pas etre pris pour du contenu qui
+    # deborde sur le cote voisin (sinon l'extension s'emballe).
+    inset = 2 * step
+
+    while (moved["droite"] < max_extend and right < w - border_px
+           and _strip_is_clipped(g[top + inset:bottom - inset, right - strip:right])):
+        grow = min(step, w - border_px - right)
+        right += grow
+        moved["droite"] += grow
+    while (moved["gauche"] < max_extend and left > border_px
+           and _strip_is_clipped(g[top + inset:bottom - inset, left:left + strip])):
+        grow = min(step, left - border_px)
+        left -= grow
+        moved["gauche"] += grow
+    while (moved["bas"] < max_extend and bottom < h - border_px
+           and _strip_is_clipped(g[bottom - strip:bottom, left + inset:right - inset])):
+        grow = min(step, h - border_px - bottom)
+        bottom += grow
+        moved["bas"] += grow
+    while (moved["haut"] < max_extend and top > border_px
+           and _strip_is_clipped(g[top:top + strip, left + inset:right - inset])):
+        grow = min(step, top - border_px)
+        top -= grow
+        moved["haut"] += grow
+
+    # Le dernier pas peut depasser le bord reel du papier de quelques pixels :
+    # sur un cote etendu, on rogne tant que la ligne de bord est du fond
+    # (luminosite mediane nettement sous celle du papier), au plus d'un pas
+    # plus la largeur de bande (= depassement maximal possible du dernier pas).
+    def is_background(line):
+        return float(np.median(line)) < 215
+
+    for _ in range(step + strip):
+        if moved["droite"] and is_background(g[top + inset:bottom - inset, right - 1]):
+            right -= 1
+        else:
+            break
+    for _ in range(step + strip):
+        if moved["gauche"] and is_background(g[top + inset:bottom - inset, left]):
+            left += 1
+        else:
+            break
+    for _ in range(step + strip):
+        if moved["bas"] and is_background(g[bottom - 1, left + inset:right - inset]):
+            bottom -= 1
+        else:
+            break
+    for _ in range(step + strip):
+        if moved["haut"] and is_background(g[top, left + inset:right - inset]):
+            top += 1
+        else:
+            break
+
+    return (left, top, right, bottom), moved
+
+
+def auto_crop_to_content(image_path, margin_px=None, border_px=None, density_cutoff=0.006):
+    # border_px et margin_px sont calibres en pixels pour 200 DPI ; on les
+    # met a l'echelle pour rester equivalents en distance physique a
+    # n'importe quelle resolution.
+    if border_px is None:
+        border_px = max(8, round(8 * DPI / 200))
+    if margin_px is None:
+        margin_px = max(1, round(AUTO_CROP_MARGIN * DPI / 200))
     try:
         with Image.open(image_path) as img:
             gray = img.convert("L")
@@ -269,6 +356,19 @@ def auto_crop_to_content(image_path, margin_px=AUTO_CROP_MARGIN, border_px=8, de
             bottom = min(img.height, bottom + border_px + margin_px)
             left = max(0, left + border_px - margin_px)
             right = min(img.width, right + border_px + margin_px)
+
+            (left, top, right, bottom), moved = _extend_over_clipped_content(
+                np.asarray(gray), (left, top, right, bottom), border_px,
+                max_extend=2 * DPI,  # 2 pouces au maximum par cote
+                step=max(3, round(6 * DPI / 200)),
+                strip=max(3, round(4 * DPI / 200)),
+            )
+            if any(moved.values()):
+                log.info(
+                    "Page %s : cadre etendu pour ne pas couper du contenu (%s)",
+                    os.path.basename(image_path),
+                    ", ".join(f"{side} +{px}px" for side, px in moved.items() if px),
+                )
 
             if (right - left) < 20 or (bottom - top) < 20:
                 return  # garde-fou contre une detection aberrante
@@ -333,6 +433,7 @@ def finalize_pdf(page_paths, created_at):
         "-n", "0",
         "--ocrlang", OCR_LANG,
         "--enableocr",
+        "--jpegquality", str(JPEG_QUALITY),
         "-o", output_path,
         "--force",
     ]
