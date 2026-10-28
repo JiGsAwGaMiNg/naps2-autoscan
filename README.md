@@ -135,7 +135,9 @@ Placer un raccourci vers `run_autoscan.bat` dans :
      (`AUTO_CROP`), quel que soit son format d'origine. Le cadre se cale
      sur le texte dense, puis est repousse cote par cote si un element
      epars (filet, bandeau, tampon...) le traverse, pour ne rien couper
-     (l'extension est notee dans `autoscan.log` : « cadre etendu ») ;
+     (l'extension est notee dans `autoscan.log` : « cadre etendu »).
+     Verticalement, un bloc court proche du contenu (pied de ticket d'une
+     ou deux lignes) est rattache s'il en est distant de moins d'un demi-pouce ;
    - chaque page est reorientee automatiquement si necessaire (detection
      Tesseract OSD, `AUTO_ROTATE`) ;
    - toutes les pages sont fusionnees et passees a l'OCR en un seul PDF

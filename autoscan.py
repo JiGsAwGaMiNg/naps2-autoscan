@@ -224,14 +224,30 @@ def _find_runs(bool_array):
     return runs
 
 
-def _content_extent(density, cutoff, min_width):
+def _content_extent(density, cutoff, min_width, max_gap=0):
     """Union des bornes de tous les blocs de densite au-dessus du seuil et
     assez larges pour etre du contenu (logo, paragraphe, code-barres...)
-    plutot qu'un artefact ponctuel (bruit capteur, bande parasite)."""
-    runs = [r for r in _find_runs(density > cutoff) if r[1] - r[0] + 1 >= min_width]
-    if not runs:
+    plutot qu'un artefact ponctuel (bruit capteur, bande parasite).
+
+    Avec max_gap > 0, les blocs trop etroits pour compter seul (un pied de
+    ticket d'une ou deux lignes, par exemple) sont rattaches a l'etendue
+    deja retenue s'ils en sont distants de moins de max_gap : ils font
+    partie du document, alors qu'un artefact isole, lui, est loin."""
+    runs = _find_runs(density > cutoff)
+    core = [r for r in runs if r[1] - r[0] + 1 >= min_width]
+    if not core:
         return None
-    return min(r[0] for r in runs), max(r[1] for r in runs)
+    low, high = min(r[0] for r in core), max(r[1] for r in core)
+    if max_gap > 0:
+        grew = True
+        while grew:
+            grew = False
+            for start, end in runs:
+                if start < low and low - end <= max_gap:
+                    low, grew = start, True
+                if end > high and start - high <= max_gap:
+                    high, grew = end, True
+    return low, high
 
 
 def _strip_is_clipped(region, ink_level=150, max_ink_fraction=0.6):
@@ -345,7 +361,13 @@ def auto_crop_to_content(image_path, margin_px=None, border_px=None, density_cut
             # scan a l'autre et peuvent depasser le seuil sur une largeur
             # trop faible pour etre du vrai contenu.
             min_width = window * 3
-            row_extent = _content_extent(row_density, density_cutoff, min_width)
+            # Verticalement, on rattache aussi les blocs courts proches (pied
+            # de ticket d'une ou deux lignes, mention isolee...) : separes du
+            # corps par un simple blanc, ils sont trop etroits pour passer le
+            # filtre de largeur seuls. Pas fait horizontalement, ou un petit
+            # bloc colle au contenu est surtout l'ombre du bord du papier.
+            row_extent = _content_extent(
+                row_density, density_cutoff, min_width, max_gap=round(0.5 * DPI))
             col_extent = _content_extent(col_density, density_cutoff, min_width)
             if row_extent is None or col_extent is None:
                 return
