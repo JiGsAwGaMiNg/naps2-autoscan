@@ -58,7 +58,6 @@ NAPS2_CONSOLE = os.environ.get(
 DEVICE_NAME = os.environ["DEVICE_NAME"]
 DPI = int(os.environ.get("DPI", "200"))
 COLOR_MODE = os.environ.get("COLOR_MODE", "color")  # "color", "gray" ou "bw"
-JPEG_QUALITY = int(os.environ.get("JPEG_QUALITY", "75"))
 # Zone de capture maximale (le DS-640 supporte jusqu'a 8.5x14in) -- le
 # cadrage sur la taille reelle du papier se fait ensuite via AUTO_CROP,
 # ce qui evite de forcer un format fixe (a4/letter/...) pour tous les scans.
@@ -398,7 +397,10 @@ def auto_crop_to_content(image_path, margin_px=None, border_px=None, density_cut
                 return
 
             cropped = img.crop((left, top, right, bottom))
-            cropped.save(image_path)
+            # dpi explicite : PIL perd la resolution au reenregistrement et
+            # NAPS2 dimensionnerait alors la page du PDF a 96 DPI (un ticket
+            # de 3 po deviendrait une page de 9 po).
+            cropped.save(image_path, dpi=(DPI, DPI))
             log.info(
                 "Page %s : recadree de %dx%d a %dx%d",
                 os.path.basename(image_path), img.width, img.height,
@@ -419,7 +421,7 @@ def correct_orientation(image_path):
             rotate = int(osd.get("rotate", 0))
             if rotate:
                 corrected = img.rotate(-rotate, expand=True)
-                corrected.save(image_path)
+                corrected.save(image_path, dpi=(DPI, DPI))
                 log.info(
                     "Page %s : rotation corrigee de %d degres (confiance %.1f)",
                     os.path.basename(image_path), rotate, osd.get("orientation_conf", 0),
@@ -455,7 +457,6 @@ def finalize_pdf(page_paths, created_at):
         "-n", "0",
         "--ocrlang", OCR_LANG,
         "--enableocr",
-        "--jpegquality", str(JPEG_QUALITY),
         "-o", output_path,
         "--force",
     ]

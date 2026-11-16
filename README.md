@@ -115,7 +115,6 @@ Placer un raccourci vers `run_autoscan.bat` dans :
 | `DEVICE_NAME`   | Nom (ou partie du nom) du scanner                                   | *(obligatoire)*                          |
 | `DPI`           | Resolution de scan (300 = bon compromis OCR, 600 = qualite max du DS-640) | `300`                               |
 | `COLOR_MODE`    | `color`, `gray` ou `bw`                                             | `color`                                   |
-| `JPEG_QUALITY`  | Qualite JPEG (0-100) des images dans le PDF final                   | `90`                                      |
 | `PAGE_SIZE`     | Zone de capture maximale (pas la taille du papier, voir `AUTO_CROP`)  | `8.5x14in`                                |
 | `DESKEW`        | Redresser automatiquement les pages legerement de travers            | `true`                                    |
 | `AUTO_CROP`     | Recadrer automatiquement chaque page sur son contenu reel, quel que soit son format | `true`                   |
