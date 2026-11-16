@@ -120,6 +120,11 @@ Placer un raccourci vers `run_autoscan.bat` dans :
 | `AUTO_CROP`     | Recadrer automatiquement chaque page sur son contenu reel, quel que soit son format | `true`                   |
 | `AUTO_CROP_THRESHOLD` | Seuil (0-255) distinguant papier et fond hors-page              | `25`                                      |
 | `AUTO_ROTATE`   | Corriger l'orientation d'une page inseree a l'envers/de cote          | `true`                                    |
+| `AUTO_SORT`     | Tri automatique des PDF (aussi activable depuis l'icone)             | `true`                                    |
+| `SORT_MODE`     | `simulation` (journalise sans deplacer) ou `active` (deplace)        | `simulation`                              |
+| `SORT_ROOT`     | Racine des dossiers deja ranges (sert d'exemples et de destination)  | dossier parent de `OUTPUT_FOLDER`         |
+| `SORT_SKIP`     | Dossiers de 1er niveau exclus du tri, separes par des virgules      | `Avocat,2FA`                              |
+| `LOG_FILE`      | Emplacement du log (rotation 1 Mo x 3)                               | `autoscan.log` a cote du script           |
 | `OCR_LANG`      | Langue(s) OCR (codes 3 lettres, combinables avec `+`)                | `fra+eng`                                 |
 | `TESSERACT_CMD` | Chemin vers `tesseract.exe` (pour `AUTO_ROTATE` uniquement)          | `C:\Program Files\Tesseract-OCR\tesseract.exe` |
 
@@ -142,6 +147,44 @@ Placer un raccourci vers `run_autoscan.bat` dans :
    - toutes les pages sont fusionnees et passees a l'OCR en un seul PDF
      (`scan_AAAA-MM-JJ_HH-MM-SS.pdf`) dans `OUTPUT_FOLDER` ;
    - l'attente reprend pour un nouveau document.
+
+## Tri automatique
+
+Apres chaque PDF, Autoscan propose un dossier de destination et un nouveau
+nom `AAAA-MM-JJ_Libelle.pdf` (date lue dans le texte, sinon date du scan).
+Tout est calcule en local, aucun contenu n'est envoye a l'exterieur.
+
+- **Apprentissage** : les PDF deja ranges sous `SORT_ROOT` servent
+  d'exemples. Un nouveau document est compare (texte OCR, TF-IDF + voisins
+  les plus proches) aux documents ranges ; il est classe avec le dossier de
+  ses voisins s'ils sont assez proches et d'accord entre eux. Si le
+  classement est douteux (`ambigu`) ou si rien ne ressemble (`non reconnu`),
+  le PDF reste dans `OUTPUT_FOLDER`. Le dossier `Annee` n'est ajoute que si
+  les documents de ce dossier sont ranges par annee.
+- **Regles manuelles** (facultatif) : `rules.json` (voir `rules.example.json`)
+  prime sur l'apprentissage ; mots-cles `keywords` / `all` / `none`.
+- **Simulation d'abord** : avec `SORT_MODE=simulation`, chaque decision est
+  ecrite dans `autoscan.log` et `sort_journal.jsonl` sans rien deplacer.
+  Passer a `SORT_MODE=active` pour deplacer reellement. Un fichier existant
+  n'est jamais ecrase (suffixe `_2`).
+- **Menu de l'icone** : case « Tri automatique » pour l'activer/desactiver.
+- **Fenetre de tri** (`sort_gui.py`) : double-clic sur l'icone ou menu
+  « Trier les scans... ». Elle liste les PDF en attente dans `OUTPUT_FOLDER`
+  avec un apercu, les dossiers suggeres (et leur score), un champ dossier
+  avec recherche, la case « sous-dossier par annee », la date et le nom
+  (modifiables). `Entree` = classer ; « Annuler le dernier classement »
+  remet le PDF en attente ; « Supprimer (Corbeille) » (ou la touche `Suppr`
+  dans la liste) envoie un scan fait par erreur a la Corbeille Windows,
+  apres confirmation -- jamais de suppression definitive. Chaque classement manuel est journalise et
+  ameliore les propositions suivantes. L'apercu utilise l'image integree au
+  PDF ; `pip install pypdfium2` (facultatif) permet d'afficher aussi les PDF
+  sans image.
+- Pour voir ce que donnerait le tri sur un dossier sans rien deplacer :
+  `python sorter.py --folder <A_TRIER> --root <Documents>`
+
+Limites : plusieurs feuilles scannees dans `WAIT_SECONDS` forment un seul PDF,
+classe d'un bloc. Le premier lancement lit tout `SORT_ROOT` (quelques minutes
+selon le volume), les suivants sont quasi instantanes (cache `sort_model.pkl`).
 
 ## Tickets de caisse et documents longs
 

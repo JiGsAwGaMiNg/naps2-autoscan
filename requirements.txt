@@ -5,3 +5,6 @@ python-dotenv
 pywin32
 pytesseract
 numpy
+
+# Facultatif : apercu de tous les PDF dans la fenetre de tri
+# pypdfium2

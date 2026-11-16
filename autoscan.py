@@ -25,13 +25,16 @@ native (la meme que "Telecopie et numerisation Windows", qui fonctionne),
 et echoue rapidement (~2s) quand le bac est vide.
 """
 
+import json
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 import uuid
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 
 import numpy as np
 import pystray
@@ -40,6 +43,9 @@ import win32job
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw, ImageFilter
 from pypdf import PdfWriter
+
+import sorter
+from folder_model import FolderModel
 
 # ---------------------------------------------------------------------------
 # Configuration (lue depuis .env -- voir .env.example)
@@ -76,8 +82,12 @@ AUTO_ROTATE = os.environ.get("AUTO_ROTATE", "true").lower() != "false"
 OCR_LANG = os.environ.get("OCR_LANG", "fra+eng")
 TESSERACT_CMD = os.environ.get("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
 
+from config import (  # noqa: E402  (tri automatique et chemins : voir config.py)
+    AUTO_SORT, LOG_FILE, RULES_FILE, SORT_JOURNAL, SORT_MODE, SORT_MODEL_FILE,
+    SORT_ROOT, SORT_SKIP, STATE_FILE,
+)
+
 SESSION_DIR = os.path.join(OUTPUT_FOLDER, ".autoscan_tmp")
-LOG_FILE = os.path.join(OUTPUT_FOLDER, "autoscan.log")
 
 EMPTY_FEEDER_MARKERS = (
     "aucune page dans le dispositif",  # FR
@@ -86,12 +96,31 @@ EMPTY_FEEDER_MARKERS = (
 
 pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 
-logging.basicConfig(
-    filename=LOG_FILE,
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
+# Log tournant : 1 Mo x 3 fichiers au maximum, quoi qu'il arrive.
+_log_handler = RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+_log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[_log_handler])
 log = logging.getLogger("autoscan")
+
+sort_model = FolderModel(SORT_MODEL_FILE)
+sort_model_lock = threading.Lock()  # un seul rafraichissement du modele a la fois
+sort_state = {"enabled": AUTO_SORT}
+
+
+def load_state():
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            sort_state["enabled"] = bool(json.load(f).get("auto_sort", AUTO_SORT))
+    except (OSError, ValueError):
+        pass
+
+
+def save_state():
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"auto_sort": sort_state["enabled"]}, f)
+    except OSError:
+        log.exception("Etat non enregistre")
 
 
 class ScanFailed(Exception):
@@ -478,6 +507,42 @@ def finalize_pdf(page_paths, created_at):
         os.remove(p)
 
     log.info("PDF finalise : %s (%d page(s))", output_path, len(page_paths))
+    sort_pdf(output_path, created_at)
+
+
+# ---------------------------------------------------------------------------
+# Tri automatique (classement + renommage), voir sorter.py
+# ---------------------------------------------------------------------------
+
+def refresh_sort_model():
+    """Met a jour le modele d'apprentissage depuis les dossiers deja ranges
+    (premier passage long ; ensuite seuls les PDF nouveaux sont relus)."""
+    try:
+        with sort_model_lock:
+            total, reread = sort_model.refresh(SORT_ROOT, skip=SORT_SKIP, exclude=[OUTPUT_FOLDER])
+        if reread:
+            log.info("Modele de tri : %d PDF ranges (%d relus)", total, reread)
+    except Exception:
+        log.exception("Mise a jour du modele de tri impossible")
+
+
+def sort_pdf(pdf_path, created_at):
+    """Propose (simulation) ou effectue (mode actif) le classement du PDF.
+    Ne doit jamais faire echouer le scan : le PDF reste dans OUTPUT_FOLDER
+    en cas de probleme."""
+    if not sort_state["enabled"]:
+        return
+    try:
+        refresh_sort_model()
+        rules = sorter.load_rules(RULES_FILE) if os.path.exists(RULES_FILE) else []
+        plan = sorter.plan_for(
+            pdf_path, sort_model, rules, SORT_ROOT, datetime.fromtimestamp(created_at))
+        simulate = SORT_MODE != "active"
+        final = sorter.apply_plan(plan, simulate=simulate, journal_path=SORT_JOURNAL)
+        if final and not simulate:
+            sort_model.add(final, SORT_ROOT)
+    except Exception:
+        log.exception("Tri automatique impossible pour %s (le PDF reste en place)", pdf_path)
 
 
 # ---------------------------------------------------------------------------
@@ -493,16 +558,34 @@ def scan_loop(stop_event):
     session_created_at = None
     last_activity = None
 
+    consecutive_errors = 0
+    last_error = None
+
     while not stop_event.is_set():
         tmp_path = os.path.join(SESSION_DIR, f"page_{uuid.uuid4().hex}.png")
 
         try:
             scanned = scan_page_to_image(tmp_path)
         except ScanFailed as e:
-            log.error("Echec du scan : %s", e)
-            set_status("error", str(e)[:120])
-            stop_event.wait(POLL_INTERVAL)
+            consecutive_errors += 1
+            message = str(e)
+            # Scanner eteint ou debranche : la meme erreur reviendrait a chaque
+            # tentative. On ne la journalise qu'une fois (puis aux paliers
+            # 10, 100, 1000...) et on espace les tentatives (2, 4, 8, 16, 30 s).
+            if message != last_error:
+                log.error("Echec du scan : %s", message)
+                last_error = message
+            elif consecutive_errors in (10, 100) or consecutive_errors % 1000 == 0:
+                log.error("Meme echec depuis %d tentatives : %s", consecutive_errors, message)
+            set_status("error", message[:120])
+            stop_event.wait(min(POLL_INTERVAL * 2 ** min(consecutive_errors - 1, 5), 30))
             continue
+
+        if consecutive_errors:
+            log.info("Scanner de nouveau disponible apres %d echec(s)", consecutive_errors)
+            consecutive_errors, last_error = 0, None
+            if not session_pages:
+                set_status("idle", "en attente d'un document")
 
         if scanned:
             if not session_pages:
@@ -535,14 +618,44 @@ def quit_app(icon, item, stop_event):
     icon.stop()
 
 
+def toggle_auto_sort(icon, item):
+    sort_state["enabled"] = not sort_state["enabled"]
+    save_state()
+    log.info("Tri automatique %s", "active" if sort_state["enabled"] else "desactive")
+
+
+gui_process = None
+
+
+def open_sort_window(icon, item):
+    """Ouvre la fenetre de tri (processus a part ; une seule a la fois)."""
+    global gui_process
+    if gui_process is not None and gui_process.poll() is None:
+        return  # deja ouverte : la fenetre garde son propre verrou
+    gui_process = subprocess.Popen(
+        [sys.executable, os.path.join(SCRIPT_DIR, "sort_gui.py")],
+        cwd=SCRIPT_DIR, creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+
+
+def auto_sort_label(item):
+    return "Tri automatique" + (" (simulation)" if SORT_MODE != "active" else "")
+
+
 def main():
     global tray_icon
+
+    load_state()
+    sort_model.load()
+    threading.Thread(target=refresh_sort_model, daemon=True).start()
 
     stop_event = threading.Event()
     worker = threading.Thread(target=scan_loop, args=(stop_event,), daemon=True)
 
     menu = pystray.Menu(
+        pystray.MenuItem("Trier les scans...", open_sort_window, default=True),
         pystray.MenuItem("Ouvrir le dossier de sortie", open_output_folder),
+        pystray.MenuItem(auto_sort_label, toggle_auto_sort, checked=lambda item: sort_state["enabled"]),
         pystray.MenuItem("Quitter", lambda icon, item: quit_app(icon, item, stop_event)),
     )
     tray_icon = pystray.Icon("autoscan", ICONS["idle"], "Autoscan DS-640", menu)

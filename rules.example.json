@@ -1,0 +1,16 @@
+{
+  "rules": [
+    {
+      "name": "Taxe fonciere",
+      "keywords": ["taxe fonciere", "avis de taxe fonciere"],
+      "folder": "Impots/Taxe Fonciere/{year}",
+      "filename": "{date}_Taxe_fonciere"
+    },
+    {
+      "name": "Fiche de paie",
+      "keywords": ["bulletin de paie", "fiche de paie", "lohnabrechnung"],
+      "none": ["attestation"],
+      "folder": "Travail/Fiches de paie/{year}"
+    }
+  ]
+}

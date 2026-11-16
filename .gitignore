@@ -9,3 +9,9 @@ naps2*.zip
 # Sorties et logs generes localement
 *.log
 .autoscan_tmp/
+
+# Regles de tri, journal et etat : propres a chaque installation
+rules.json
+sort_journal.jsonl
+autoscan_state.json
+sort_model.pkl
